@@ -4,86 +4,89 @@ import (
 	"errors"
 	"fmt"
 	"log"
-
-	"tmapi/config"
-	"tmapi/tmfuncs"
+	"net/url"
 
 	"github.com/dghubble/oauth1"
 )
 
-func openBrowser(url string) {
-	fmt.Println("Trying to redirect browser...")
-	redirectAddr <- url
+//SessionSettings holds all the settings for an individual session
+type SessionSettings struct {
+	ConsumerKey    string
+	ConsumerSecret string
+	CallbackServer *OAuthCallbackServer
+	Sandbox        bool
+}
+
+//TMSession struct
+type TMSession struct {
+	Config *oauth1.Config
+
+	//Used Internally
+	requestToken   *oauth1.Token
+	accessToken    *oauth1.Token
+	callbackServer *OAuthCallbackServer
 }
 
 //MakeNewTMSession func
-func MakeNewTMSession() (*tmfuncs.TMSession, error) {
+func MakeNewTMSession(sessSettings *SessionSettings) *TMSession {
 
-	session := tmfuncs.TMSession{}
-	log.Printf("Website Selected: %s\n", config.Settings.Host)
+	session := TMSession{callbackServer: sessSettings.CallbackServer}
+	session.Config = oauth1.NewConfig(sessSettings.ConsumerKey, sessSettings.ConsumerSecret)
+	//Cbf righting a proper mechanism here to get the callback url
+	//Probs gonna bite me in the ass if I try to make the server remote but oh well
+	session.Config.CallbackURL = fmt.Sprintf("https://localhost:%d", session.callbackServer.Settings.Port)
 
-	session.TradeMeEndpoint = oauth1.Endpoint{
-		RequestTokenURL: config.Settings.Endpoint.RequestTokenURL,
-		AuthorizeURL:    config.Settings.Endpoint.AuthorizeURL,
-		AccessTokenURL:  config.Settings.Endpoint.AccessTokenURL,
+	host := "trademe"
+	if sessSettings.Sandbox {
+		host = "tmsandbox"
 	}
 
-	log.Printf("Request Token URL: %s\n", session.TradeMeEndpoint.RequestTokenURL)
-
-	session.Config = oauth1.NewConfig(config.Settings.ConsumerKey, config.Settings.ConsumerSecret)
-	session.Config.CallbackURL = config.Settings.CallbackURL
-	session.Config.Endpoint = session.TradeMeEndpoint
-
-	err := Login(&session)
-	if err != nil {
-		return nil, err
+	session.Config.Endpoint = oauth1.Endpoint{
+		RequestTokenURL: fmt.Sprintf("https://secure.%s.co.nz/RequestToken", host),
+		AuthorizeURL:    fmt.Sprintf("https://secure.%s.co.nz/Authorize", host),
+		AccessTokenURL:  fmt.Sprintf("https://secure.%s.co.nz/AccessToken", host),
 	}
 
-	err = Authenticate(&session)
-	session.GenHTTPClient()
-
-	return &session, err
+	return &session
 }
 
-//Login func
-func Login(session *tmfuncs.TMSession) error {
+//GetAuthorizationURL Gets the request token from TM then
+//generates the authorization URL.
+func GetAuthorizationURL(session *TMSession) (*url.URL, error) {
 
 	requestToken, requestSecret, err := session.Config.RequestToken()
 	log.Printf("Request Token: %s\n", requestToken)
 	log.Printf("Request Secret: %s\n", requestSecret)
 
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	if requestToken == "" || requestSecret == "" {
-		return errors.New("Invalid request tokens recieved")
+		return nil, errors.New("Invalid request tokens recieved")
 	}
 
 	authorizationURL, err := session.Config.AuthorizationURL(requestToken)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	log.Printf("Opening Authorization URL in Browser: %s\n", authorizationURL.String())
-	openBrowser(authorizationURL.String())
-
-	session.RequestToken = oauth1.NewToken(requestToken, requestSecret)
-	return nil
+	session.callbackServer.Register(requestToken)
+	return authorizationURL, nil
 }
 
-//Authenticate func
-func Authenticate(session *tmfuncs.TMSession) error {
+//Authenticate waits for the server to recieve the
+//authorization key then generates the access tokens.
+func Authenticate(session *TMSession) error {
 	log.Println("Waiting for OAuth Server Authentication....")
-
-	verifier := WaitForOauthVerify()
-	accessToken, accessSecret, err := session.Config.AccessToken(session.RequestToken.Token, session.RequestToken.TokenSecret, verifier)
+	verifier := session.callbackServer.WaitForOAuthVerify(session.requestToken.Token)
+	accessToken, accessSecret, err := session.Config.AccessToken(session.requestToken.Token, session.requestToken.TokenSecret, verifier)
 
 	if err != nil {
 		return errors.New("Access Token Auth Failed")
 	}
 
 	log.Println("Authenticated!!")
-	session.AccessToken = oauth1.NewToken(accessToken, accessSecret)
+	session.accessToken = oauth1.NewToken(accessToken, accessSecret)
 	return nil
 }

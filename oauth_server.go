@@ -5,70 +5,81 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"tmapi/config"
 )
 
-var serverUp bool = false
-var oauthVerifier chan string
-var redirectAddr chan string
-
-//WaitForOauthVerify func
-func WaitForOauthVerify() string {
-	return <-oauthVerifier
+type OAuthCallbackServerSettings struct {
+	CertFile string
+	KeyFile  string
+	Port     int
 }
 
-func listenAndServe() {
-	addr := fmt.Sprintf(":%d", config.Settings.ServerPort)
-	log.Println("[Server] Starting Server")
-	err := http.ListenAndServeTLS(addr, config.Settings.ServerCertFile, config.Settings.ServerKeyFile, nil)
-	if err != nil {
-		log.Fatalf("[Server] Server failed to start: %s\n", err.Error())
+type OAuthCallbackServer struct {
+	Settings   OAuthCallbackServerSettings
+	verifyList map[string]chan string
+}
+
+//Register Registers a requestToken that will be verified by the server later
+func (server *OAuthCallbackServer) Register(requestToken string) {
+	server.verifyList[requestToken] = make(chan string)
+}
+
+//WaitForOAuthVerify -
+func (server *OAuthCallbackServer) WaitForOAuthVerify(requestToken string) string {
+	return <-server.verifyList[requestToken]
+}
+
+//StartOAuthServer starts an internal OAuth server.
+func StartOAuthServer(settings OAuthCallbackServerSettings) (*OAuthCallbackServer, error) {
+	log.Println("[Server] Starting OAuth server...")
+
+	var server = OAuthCallbackServer{Settings: settings}
+	server.verifyList = make(map[string]chan string)
+
+	http.HandleFunc("/", server.oauthCallbackURLHandler)
+
+	if _, err := os.Stat(settings.CertFile); err != nil {
+		log.Println("[Server] Cannot find ServerCertFile")
+		return nil, err
 	}
+
+	if _, err := os.Stat(settings.KeyFile); err != nil {
+		log.Println("[Server] Cannot find ServerKeyFile")
+		return nil, err
+	}
+
+	log.Printf("[Server] Using HTTPS Files: <%s>, <%s>", settings.CertFile, settings.KeyFile)
+	go listenAndServe(settings)
+
+	return &server, nil
 }
 
-//StartServer func
-func StartServer() {
-	if serverUp {
-		log.Println("Server already up!")
+func (server *OAuthCallbackServer) oauthCallbackURLHandler(w http.ResponseWriter, r *http.Request) {
+
+	w.Header().Set("Content-Type", "text/plain")
+
+	verifKeys, ok := r.URL.Query()["oauth_verifier"]
+	if !ok || len(verifKeys[0]) < 1 {
+		fmt.Fprintf(w, "Missing oauth_verifier paramter!")
 		return
 	}
 
-	log.Println("[Server] Starting server...")
-
-	serverUp = true
-	oauthVerifier = make(chan string)
-	redirectAddr = make(chan string)
-
-	http.HandleFunc("/redirect", func(w http.ResponseWriter, r *http.Request) {
-		addr := <-redirectAddr
-		w.Header().Set("Cache-Control", "no-store")
-		log.Printf("[Server] Redirecting client to %s\n", addr)
-		http.Redirect(w, r, addr, http.StatusFound)
-	})
-
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-
-		w.Header().Set("Content-Type", "text/plain")
-		keys, ok := r.URL.Query()["oauth_verifier"]
-
-		if !ok || len(keys[0]) < 1 {
-			fmt.Fprintf(w, "Missing oauth_verifier paramter!")
-			return
-		}
-
-		oauthVerifier <- keys[0]
-		fmt.Fprintf(w, "Authenticated!")
-		log.Println("[Server] Authenticated a User")
-	})
-
-	if _, err := os.Stat(config.Settings.ServerCertFile); err != nil {
-		log.Fatalln("[Server] Cannot find ServerCertFile")
+	requestTokenKeys, ok := r.URL.Query()["oauth_token"]
+	if !ok || len(requestTokenKeys[0]) < 1 {
+		fmt.Fprintf(w, "Missing oauth_token paramter!")
+		return
 	}
 
-	if _, err := os.Stat(config.Settings.ServerKeyFile); err != nil {
-		log.Fatalln("[Server] Cannot find ServerKeyFile")
-	}
+	//Shorthand non-blocking channel send
+	go func() { server.verifyList[requestTokenKeys[0]] <- verifKeys[0] }()
+	fmt.Fprintf(w, "Authenticated!")
+	log.Println("[Server] Authenticated a User")
+}
 
-	log.Printf("[Server] Using HTTPS Files: <%s>, <%s>", config.Settings.ServerCertFile, config.Settings.ServerKeyFile)
-	go listenAndServe()
+func listenAndServe(settings OAuthCallbackServerSettings) {
+	addr := fmt.Sprintf(":%d", settings.Port)
+	log.Println("[Server] Starting Server Listening")
+	err := http.ListenAndServeTLS(addr, settings.CertFile, settings.KeyFile, nil)
+	if err != nil {
+		log.Printf("[Server] Server failed to start: %s\n", err.Error())
+	}
 }
