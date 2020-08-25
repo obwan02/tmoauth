@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/http"
 	"net/url"
 
 	"github.com/dghubble/oauth1"
@@ -19,7 +20,8 @@ type SessionSettings struct {
 
 //TMSession struct
 type TMSession struct {
-	Config *oauth1.Config
+	Config     *oauth1.Config
+	HTTPClient *http.Client
 
 	//Used Internally
 	requestToken   *oauth1.Token
@@ -76,7 +78,7 @@ func GetAuthorizationURL(session *TMSession) (*url.URL, error) {
 }
 
 //Authenticate waits for the server to recieve the
-//authorization key then generates the access tokens.
+//authorization key then generates the access tokens, and HTTPClient.
 func Authenticate(session *TMSession) error {
 	log.Println("Waiting for OAuth Server Authentication....")
 	verifier := session.callbackServer.WaitForOAuthVerify(session.requestToken.Token)
@@ -88,5 +90,6 @@ func Authenticate(session *TMSession) error {
 
 	log.Println("Authenticated!!")
 	session.accessToken = oauth1.NewToken(accessToken, accessSecret)
+	session.HTTPClient = session.Config.Client(nil, session.accessToken)
 	return nil
 }
